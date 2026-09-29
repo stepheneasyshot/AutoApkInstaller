@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "autoapkinstaller",
-  "version": "0.1.0",
+  "productName": "AutoApkInstaller",
+  "version": "1.0.1",
   "identifier": "com.mac.autoapkinstaller",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "autoapkinstaller",
+        "title": "AutoApkInstaller",
         "width": 800,
-        "height": 600
+        "height": 680,
+        "minWidth": 460,
+        "minHeight": 520
       }
     ],
     "security": {
@@ -23,13 +25,30 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app"],
+    "resources": {
+      "resources/platform-tools/adb": "platform-tools/adb",
+      "resources/platform-tools/NOTICE.txt": "platform-tools/NOTICE.txt",
+      "resources/platform-tools/source.properties": "platform-tools/source.properties"
+    },
+    "fileAssociations": [
+      {
+        "ext": ["apk"],
+        "name": "Android APK",
+        "role": "Viewer",
+        "rank": "Alternate",
+        "mimeType": "application/vnd.android.package-archive",
+        "exportedType": {
+          "identifier": "com.mac.autoapkinstaller.apk",
+          "conformsTo": ["public.data"]
+        }
+      }
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
+      "icons/icon.icns"
     ]
   }
 }
