@@ -1,6 +1,6 @@
 [package]
 name = "autoapkinstaller"
-version = "1.0.2"
+version = "1.0.3"
 description = "Install APK files on Android devices from macOS and Windows"
 authors = ["you"]
 edition = "2021"
