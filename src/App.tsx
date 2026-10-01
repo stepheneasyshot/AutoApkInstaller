@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
+import appIcon from "../src-tauri/icons/128x128.png";
+import { productName, version } from "../src-tauri/tauri.conf.json";
 import {
   defaultOptions, errorFrom, installApk, listDevices, takePendingApks,
   type AppError, type Device, type InstallOptions, type InstallReport,
@@ -22,13 +25,30 @@ function App() {
   const [report, setReport] = useState<InstallReport | null>(null);
   const [problem, setProblem] = useState<AppError | null>(null);
   const [queued, setQueued] = useState(0);
+  const [closeCountdown, setCloseCountdown] = useState<number | null>(null);
+  const [keepOpen, setKeepOpen] = useState(false);
+  const [closeError, setCloseError] = useState<string | null>(null);
+  const closeGenerationRef = useRef(0);
   const queueRef = useRef<string[]>([]);
   const currentRef = useRef<string | null>(null);
   const installingRef = useRef(false);
+  // 保留结果页供重试，但已结束的任务不应阻止再次打开 APK。
+  const taskFinishedRef = useRef(false);
+
+  const cancelAutoClose = useCallback(() => {
+    // 同步失效旧定时器，防止打开事件和关闭前检查之间发生竞态。
+    closeGenerationRef.current += 1;
+    setCloseCountdown(null);
+    setKeepOpen(true);
+    setCloseError(null);
+  }, []);
 
   const install = useCallback(async (path: string, serial: string, installOptions: InstallOptions) => {
     if (installingRef.current) return;
+    cancelAutoClose();
+    setKeepOpen(false);
     installingRef.current = true;
+    taskFinishedRef.current = false;
     setSelectedSerial(serial);
     setProblem(null);
     setPhase("installing");
@@ -40,11 +60,15 @@ function App() {
       setPhase("error");
     } finally {
       installingRef.current = false;
+      taskFinishedRef.current = true;
     }
-  }, []);
+  }, [cancelAutoClose]);
 
   const inspect = useCallback(async (path: string) => {
+    cancelAutoClose();
+    setKeepOpen(false);
     currentRef.current = path;
+    taskFinishedRef.current = false;
     setFile(path);
     setReport(null);
     setProblem(null);
@@ -66,27 +90,70 @@ function App() {
     } catch (reason) {
       setProblem(errorFrom(reason));
       setPhase("error");
+      taskFinishedRef.current = true;
     }
-  }, [install]);
+  }, [install, cancelAutoClose]);
 
   const startNext = useCallback(() => {
     if (installingRef.current) return;
+    cancelAutoClose();
     const next = queueRef.current.shift();
     setQueued(queueRef.current.length);
     if (next) {
       void inspect(next);
     } else {
       currentRef.current = null;
+      taskFinishedRef.current = false;
       setFile(null);
       setPhase("idle");
     }
-  }, [inspect]);
+  }, [inspect, cancelAutoClose]);
 
   const enqueue = useCallback((paths: string[]) => {
+    if (!paths.length) return;
+    cancelAutoClose();
     queueRef.current.push(...paths);
     setQueued(queueRef.current.length);
-    if (!currentRef.current) startNext();
-  }, [startNext]);
+    if (!currentRef.current || taskFinishedRef.current) startNext();
+  }, [startNext, cancelAutoClose]);
+
+  useEffect(() => {
+    if (phase !== "result" || !report?.success || queued > 0 || keepOpen) {
+      setCloseCountdown(null);
+      return;
+    }
+    const generation = ++closeGenerationRef.current;
+    const deadline = Date.now() + 3000;
+    setCloseCountdown(3);
+    const timer = setInterval(() => {
+      if (generation !== closeGenerationRef.current) {
+        clearInterval(timer);
+        return;
+      }
+      const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      setCloseCountdown(remaining);
+      if (remaining > 0) return;
+      clearInterval(timer);
+      void (async () => {
+        try {
+          // 关闭前再读取原生待处理文件，避免遗漏尚未交给前端的 APK。
+          const paths = await takePendingApks();
+          if (paths.length) enqueue(paths);
+          if (generation !== closeGenerationRef.current) return;
+          if (installingRef.current || !taskFinishedRef.current || queueRef.current.length) return;
+          await getCurrentWindow().close();
+        } catch (reason) {
+          if (generation !== closeGenerationRef.current) return;
+          cancelAutoClose();
+          setCloseError(`自动关闭失败：${errorFrom(reason).message}`);
+        }
+      })();
+    }, 100);
+    return () => {
+      clearInterval(timer);
+      if (generation === closeGenerationRef.current) closeGenerationRef.current += 1;
+    };
+  }, [phase, report, queued, keepOpen, enqueue, cancelAutoClose]);
 
   const drainOpenedFiles = useCallback(async () => {
     try {
@@ -103,7 +170,10 @@ function App() {
     let disposed = false;
     void (async () => {
       try {
-        const stop = await listen("apk-opened", () => { void drainOpenedFiles(); });
+        const stop = await listen("apk-opened", () => {
+          cancelAutoClose();
+          void drainOpenedFiles();
+        });
         if (disposed) { stop(); return; }
         unlisten = stop;
         await drainOpenedFiles();
@@ -113,9 +183,10 @@ function App() {
       }
     })();
     return () => { disposed = true; unlisten?.(); };
-  }, [drainOpenedFiles]);
+  }, [drainOpenedFiles, cancelAutoClose]);
 
   async function chooseFile() {
+    cancelAutoClose();
     try {
       const picked = await open({ multiple: false, directory: false, filters: [{ name: "Android APK", extensions: ["apk"] }] });
       if (typeof picked === "string") enqueue([picked]);
@@ -131,25 +202,30 @@ function App() {
 
   const available = devices.filter((device) => device.state === "device");
   const unavailable = devices.filter((device) => device.state !== "device");
+  const selectedDevice = devices.find((device) => device.serial === selectedSerial);
+  const deviceSummary = selectedDevice?.description
+    ? `${selectedDevice.description} · ${selectedSerial}`
+    : selectedSerial;
 
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand"><span className="brand-mark">A</span><span>AutoApkInstaller</span></div>
+        <div className="brand">
+          <img className="brand-icon" src={appIcon} alt="" width={32} height={32} />
+          <div className="brand-copy">
+            <span className="brand-name" title={productName}>{productName}</span>
+            <span className="brand-version">v{version}</span>
+          </div>
+        </div>
         <button className="button button-quiet" onClick={() => void chooseFile()}>
           {file ? "添加 APK" : "选择 APK"}
         </button>
       </header>
 
-      <section className={`content${file ? " has-file" : ""}`} data-phase={phase}>
-        {!file && <div className="eyebrow">ANDROID · MACOS</div>}
-        <h1>{file ? <>安装到<span>设备。</span></> : <>双击 APK，<br /><span>安装到设备。</span></>}</h1>
-        {!file && <p className="intro">连接 Android 设备后，打开 APK 即可开始安装。</p>}
-
+      <section className="content" data-phase={phase}>
         {file && <div className="file-card">
           <div className="file-icon">APK</div>
           <div className="file-copy"><strong title={file}>{fileName(file)}</strong><span title={file}>{file}</span></div>
-          <div className="file-tag">当前文件</div>
         </div>}
 
         <div className="panel" aria-live="polite">
@@ -187,20 +263,20 @@ function App() {
           </div>}
 
           {phase === "installing" && <div className="status-state">
-            <div className="spinner" /><h2>正在安装</h2><p>目标设备：{selectedSerial}</p>
+            <div className="spinner" /><h2>正在安装</h2><p className="device-summary" title={deviceSummary}>目标设备：{deviceSummary}</p>
             <p className="muted">请保持设备连接，等待 adb 返回结果。</p>
           </div>}
 
           {phase === "result" && report && <div className="result-state">
             <div className={`status-symbol ${report.success ? "green" : "red"}`}>{report.success ? "✓" : "×"}</div>
             <h2>{report.success ? "安装成功" : "安装失败"}</h2>
-            <p>目标设备：{selectedSerial}</p>
+            <p className="device-summary" title={deviceSummary}>目标设备：{deviceSummary}</p>
             <pre className="result-detail">{report.detail}</pre>
-            <div className="options"><h3>调整参数后重试</h3>
+            <details className="options" onClick={cancelAutoClose}><summary>调整参数后重试</summary>
               <label><input type="checkbox" checked={options.allowDowngrade} onChange={(event) => setOptions({ ...options, allowDowngrade: event.target.checked })} /><span>允许降级 <code>-d</code></span></label>
               <label><input type="checkbox" checked={options.grantPermissions} onChange={(event) => setOptions({ ...options, grantPermissions: event.target.checked })} /><span>授予清单权限 <code>-g</code></span></label>
               <label><input type="checkbox" checked={options.allowTestApk} onChange={(event) => setOptions({ ...options, allowTestApk: event.target.checked })} /><span>允许测试 APK <code>-t</code></span></label>
-            </div>
+            </details>
             <div className="actions"><button className="button button-primary" onClick={() => { if (file) void install(file, selectedSerial, options); }}>重新安装</button><button className="button button-quiet" onClick={startNext}>{queued ? "处理下一个 APK" : "完成"}</button></div>
           </div>}
 
@@ -213,7 +289,12 @@ function App() {
 
         {queued > 0 && <p className="queue-note">还有 {queued} 个 APK 等待处理。当前任务结束后，点击“处理下一个 APK”。</p>}
       </section>
-      <footer>通过 adb 安装 · 默认覆盖安装并保留应用数据</footer>
+      <footer>
+        {closeCountdown !== null ? <div className="close-notice">
+          <span role="status">{closeCountdown > 0 ? `安装完成，${closeCountdown} 秒后关闭窗口` : "正在关闭窗口…"}</span>
+          <button className="text-button" onClick={cancelAutoClose}>保持窗口</button>
+        </div> : closeError ? <span role="status">{closeError}</span> : "通过 adb 安装 · 默认覆盖安装并保留应用数据"}
+      </footer>
     </main>
   );
 }
