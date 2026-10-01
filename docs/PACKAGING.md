@@ -20,7 +20,7 @@ pnpm install --frozen-lockfile
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 ```
 
-确认以下资源存在，且内置 `adb` 有执行权限：
+这些资源由 `src-tauri/tauri.macos.conf.json` 打进 macOS 应用，Windows 安装包不会包含这份 `adb`。确认以下文件存在，且内置 `adb` 有执行权限：
 
 ```text
 src-tauri/resources/platform-tools/adb
@@ -109,6 +109,79 @@ hdiutil verify "$apk_installer_dmg"
 
 没有完成的项目明确记为“待实机验收”，不要根据构建成功宣称功能已验证。
 
-## 2. Windows（待补充）
+## 2. Windows：x64 安装包
 
-后续在本章补充 Windows 的资源准备、版本同步、构建命令、产物校验与实机验收。目前本仓库未完成 Windows 适配，也未验证 Windows 安装包构建流程。
+### 2.1 适用范围与执行约束
+
+产物是 64 位 Windows 的 NSIS `setup.exe`。代码已按平台选择 `adb.exe`，冷启动时读取 APK 启动参数，应用已在运行时由单实例插件把新的 APK 交给当前窗口。本章的安装包构建，以及安装后在资源管理器中双击打开，都还没有验收。
+
+遵守 [AGENTS.md](../AGENTS.md) 的编译限制：普通代码修改涉及 5 个及以下代码文件时，不以验证为由运行构建；用户明确要求打包时，按其请求执行本流程。仅编辑本打包文档不需要重新构建。不要为了打包查询提交历史。
+
+在 Windows 本机或 Windows CI 上构建。不要在 macOS 上交叉编译这个安装包。
+
+### 2.2 构建环境与资源
+
+- Windows x64。
+- Rust stable，默认主机为 `x86_64-pc-windows-msvc`。
+- Visual Studio 2022 Build Tools，包含“使用 C++ 的桌面开发”以及 Windows SDK。
+- WebView2 Runtime。Windows 11 通常已经带有。
+- Node.js 与 pnpm。
+
+环境已就绪时不必重复安装。前端依赖：
+
+```bash
+pnpm install --frozen-lockfile
+```
+
+确认 Windows 资源和图标存在：
+
+```text
+src-tauri/resources/platform-tools/windows/adb.exe
+src-tauri/resources/platform-tools/windows/AdbWinApi.dll
+src-tauri/resources/platform-tools/windows/AdbWinUsbApi.dll
+src-tauri/resources/platform-tools/windows/NOTICE.txt
+src-tauri/resources/platform-tools/windows/source.properties
+src-tauri/icons/icon.ico
+src-tauri/tauri.windows.conf.json
+```
+
+`src-tauri/tauri.windows.conf.json` 把上述 `adb.exe`、两份 DLL、`NOTICE.txt` 和 `source.properties` 映射到安装包内的同一 `platform-tools` 目录，并把打包目标设为 NSIS。应用只运行这份 `adb.exe`。Windows 加载 `adb.exe` 时会从它所在目录查找 `AdbWinApi.dll` 和 `AdbWinUsbApi.dll`，不能只复制可执行文件。不得回退到 `PATH` 或本机 Android SDK。
+
+当前副本是 Android SDK Platform-Tools `37.0.1`。更新时从同一份 `platform-tools` 覆盖 `windows/` 中的这五个文件，不要带入 `fastboot.exe` 或其他命令，然后重新打包。
+
+### 2.3 同步版本号
+
+与 [1.3 同步版本号](#13-同步版本号) 使用同一组文件。仅在用户要求升级版本时修改，不要修改依赖包的版本。
+
+### 2.4 构建命令
+
+在仓库根目录执行：
+
+```bash
+pnpm tauri build --bundles nsis
+```
+
+Tauri 会先运行配置中的 `pnpm build`，无需另行重复前端构建。首次打包时 Tauri CLI 会下载 NSIS。等待命令成功退出，并确认输出了 `setup.exe`。只完成 Rust 编译不代表安装包已经生成。
+
+### 2.5 产物位置与校验
+
+```text
+src-tauri/target/release/bundle/nsis/AutoApkInstaller_<版本号>_x64-setup.exe
+```
+
+用 `package.json` 的版本核对文件名，避免把同目录里的旧安装包当成本次产物。安装这份 `setup.exe` 后，确认安装目录的 `platform-tools` 中同时有 `adb.exe`、`AdbWinApi.dll` 和 `AdbWinUsbApi.dll`。产物存在不代表下面的实机功能已经验收。
+
+### 2.6 打包应用的实机验收
+
+安装 `setup.exe` 并退出正在运行的旧进程。对新安装的应用检查：
+
+1. 冷启动双击 APK，以及应用运行中再次双击 APK，都只保留一个窗口，并显示正确文件。运行中再次打开不得再弹出第二个窗口。
+2. 零台设备时提示连接或授权；一台可用设备时自动安装；多台设备时要求选择。未授权、离线设备不能成为安装目标。
+3. 安装 A 后打开 B，界面切换到 B，且实际安装 B；安装过程中收到新文件时暂存，不覆盖当前任务。
+4. APK 路径含空格、中文及较长文件名时仍能正确安装。
+5. 安装失败时保留错误结果；限定重试参数仍可使用。
+6. 最后一个 APK 成功安装后显示 3、2、1 秒倒计时，再关闭窗口；新任务、选择文件、调整参数或“保持窗口”能取消关闭。有等待任务或安装失败时不自动关闭。
+7. 自动关闭后再次双击 APK 能重新打开应用。
+8. 默认 480×360 和最小 400×300 尺寸下，路径、状态、设备信息、倒计时及滚动操作可用。
+
+`pnpm tauri dev` 不会向系统注册 `.apk` 关联，不能代替以上安装后的验收。没有完成的项目记为“待实机验收”。

@@ -26,11 +26,6 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
-    "resources": {
-      "resources/platform-tools/adb": "platform-tools/adb",
-      "resources/platform-tools/NOTICE.txt": "platform-tools/NOTICE.txt",
-      "resources/platform-tools/source.properties": "platform-tools/source.properties"
-    },
     "fileAssociations": [
       {
         "ext": ["apk"],

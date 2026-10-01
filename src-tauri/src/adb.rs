@@ -49,10 +49,26 @@ pub struct InstallReport {
     pub detail: String,
 }
 
+#[cfg(windows)]
+const ADB_RESOURCE: &str = "platform-tools/adb.exe";
+#[cfg(not(windows))]
+const ADB_RESOURCE: &str = "platform-tools/adb";
+
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path
+    }
+}
+
 fn adb_path(app: &tauri::AppHandle) -> Result<PathBuf, AppError> {
     let path = app
         .path()
-        .resolve("platform-tools/adb", BaseDirectory::Resource)
+        .resolve(ADB_RESOURCE, BaseDirectory::Resource)
         .map_err(|error| AppError::new("adb_missing", format!("无法定位应用内置 adb：{error}")))?;
     if !path.is_file() {
         return Err(AppError::new(
@@ -61,6 +77,18 @@ fn adb_path(app: &tauri::AppHandle) -> Result<PathBuf, AppError> {
         ));
     }
     Ok(path)
+}
+
+fn adb_command(app: &tauri::AppHandle) -> Result<Command, AppError> {
+    let mut command = Command::new(adb_path(app)?);
+    // adb.exe 是控制台程序。从窗口应用启动时要隐藏控制台，状态只显示在主窗口。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    Ok(command)
 }
 
 fn output_text(output: &std::process::Output) -> String {
@@ -96,7 +124,7 @@ fn parse_devices(stdout: &str) -> Vec<Device> {
 }
 
 pub fn list_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, AppError> {
-    let output = Command::new(adb_path(app)?)
+    let output = adb_command(app)?
         .args(["devices", "-l"])
         .output()
         .map_err(|error| AppError::new("adb_failed", format!("无法运行 adb：{error}")))?;
@@ -124,7 +152,7 @@ fn checked_apk(path: &str) -> Result<PathBuf, AppError> {
     if !canonical.is_file() {
         return Err(AppError::new("invalid_apk", "所选路径不是常规 APK 文件。"));
     }
-    Ok(canonical)
+    Ok(without_verbatim_prefix(canonical))
 }
 
 pub fn install_apk(
@@ -145,7 +173,7 @@ pub fn install_apk(
         ));
     }
 
-    let mut command = Command::new(adb_path(app)?);
+    let mut command = adb_command(app)?;
     command.arg("-s").arg(serial).arg("install").arg("-r");
     if options.allow_downgrade {
         command.arg("-d");
@@ -191,5 +219,17 @@ mod tests {
         assert_eq!(devices[0].state, "device");
         assert_eq!(devices[0].description, "product:sdk model:Pixel_8");
         assert_eq!(devices[1].state, "unauthorized");
+    }
+
+    #[test]
+    fn strips_windows_verbatim_prefix() {
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\C:\apps\demo.apk")),
+            PathBuf::from(r"C:\apps\demo.apk")
+        );
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\demo.apk")),
+            PathBuf::from(r"\\server\share\demo.apk")
+        );
     }
 }

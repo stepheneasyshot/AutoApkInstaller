@@ -16,6 +16,17 @@ function fileName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
 
+function apkKey(path: string): string {
+  let key = path.trim().replace(/\//g, "\\");
+  if (key.toLowerCase().startsWith("\\\\?\\unc\\")) {
+    key = `\\\\${key.slice(8)}`;
+  } else if (key.startsWith("\\\\?\\")) {
+    key = key.slice(4);
+  }
+  const windows = /^[a-zA-Z]:\\/.test(key) || key.startsWith("\\\\");
+  return windows ? key.toLowerCase() : key;
+}
+
 function App() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [file, setFile] = useState<string | null>(null);
@@ -110,9 +121,18 @@ function App() {
   }, [inspect, cancelAutoClose]);
 
   const enqueue = useCallback((paths: string[]) => {
-    if (!paths.length) return;
+    const seen = new Set<string>();
+    if (currentRef.current) seen.add(apkKey(currentRef.current));
+    for (const queuedPath of queueRef.current) seen.add(apkKey(queuedPath));
+    const fresh = paths.filter((path) => {
+      const key = apkKey(path);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    if (!fresh.length) return;
     cancelAutoClose();
-    queueRef.current.push(...paths);
+    queueRef.current.push(...fresh);
     setQueued(queueRef.current.length);
     if (!currentRef.current || taskFinishedRef.current) startNext();
   }, [startNext, cancelAutoClose]);
@@ -232,7 +252,7 @@ function App() {
           {phase === "idle" && <div className="empty-state">
             <div className="empty-icon">↓</div>
             <h2>准备安装</h2>
-            <p>在 Finder 中用本应用打开一个 .apk 文件，或点击右上角选择文件。</p>
+            <p>双击 APK 用本应用打开，或点击右上角选择文件。</p>
             <button className="button button-primary" onClick={() => void chooseFile()}>选择 APK 文件</button>
           </div>}
 

@@ -1,7 +1,7 @@
 [package]
 name = "autoapkinstaller"
 version = "1.0.2"
-description = "Install APK files on Android devices from macOS"
+description = "Install APK files on Android devices from macOS and Windows"
 authors = ["you"]
 edition = "2021"
 
@@ -31,3 +31,6 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+[target."cfg(windows)".dependencies]
+tauri-plugin-single-instance = "2.5.2"
